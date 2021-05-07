@@ -6,11 +6,11 @@ from scanspec.specs import Line, Spec, Squash
 
 def test_not_implemented() -> None:
     with pytest.raises(NotImplementedError):
-        Region().key_sets()
+        Region().axis_sets()
     with pytest.raises(NotImplementedError):
         Region().mask({})
     with pytest.raises(NotImplementedError):
-        Spec().keys()
+        Spec().axes()
     with pytest.raises(NotImplementedError):
         Spec().create_dimensions()
     with pytest.raises(TypeError):

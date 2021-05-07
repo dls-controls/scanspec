@@ -1,0 +1,27 @@
+.. _technical-terms:
+
+technical terms
+===============
+
+TODO: Update manual entries with function docstrings
+
+Axis:
+An axis is a fixed reference that can be scanned. i.e. a motor, time or 
+number of repetitions.
+
+Dimension:
+A dimension is a repeatable, possibly snaking structure of frames along a 
+number of axes.
+
+Frame:
+A frame is a vector of three points (lower, midpoints, upper) in scan space.
+
+Path:
+A path is a consumable route through one or more dimensions.
+
+Point:
+A point is a single or multidimensional location in scan space.
+
+Spec:
+A spec is a serializable representation of the type, parameters 
+and axis names required to produce one or more dimensions.

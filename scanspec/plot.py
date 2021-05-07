@@ -11,11 +11,13 @@ from .core import Dimension, Path
 from .regions import Circle, Rectangle, find_regions
 from .specs import TIME, Spec
 
+__all__ = ["plot_spec"]
+
 
 def _find_breaks(dim: Dimension):
     breaks = []
-    for key in dim.keys():
-        breaks.append(dim.lower[key][1:] != dim.upper[key][:-1])
+    for axes in dim.axes():
+        breaks.append(dim.lower[axes][1:] != dim.upper[axes][:-1])
     same = np.logical_or.reduce(breaks)
     break_indices = np.nonzero(same)[0] + 1
     return list(break_indices)
@@ -98,29 +100,29 @@ def plot_spec(spec: Spec):
     """
     dims = spec.create_dimensions()
     dim = Path(dims).consume()
-    keys = [k for k in spec.keys() if k is not TIME]
-    ndims = len(keys)
+    axes = [a for a in spec.axes() if a is not TIME]
+    ndims = len(axes)
 
     # Setup axes
     if ndims > 2:
         plt.figure(figsize=(6, 6))
-        axes = plt.axes(projection="3d")
-        axes.grid(False)
-        axes.set_zlabel(keys[-3])
-        axes.set_ylabel(keys[-2])
-        axes.view_init(elev=15)
+        plt_axes = plt.axes(projection="3d")
+        plt_axes.grid(False)
+        plt_axes.set_zlabel(axes[-3])
+        plt_axes.set_ylabel(axes[-2])
+        plt_axes.view_init(elev=15)
     elif ndims == 2:
         plt.figure(figsize=(6, 6))
-        axes = plt.axes()
-        axes.set_ylabel(keys[-2])
+        plt_axes = plt.axes()
+        plt_axes.set_ylabel(axes[-2])
     else:
         plt.figure(figsize=(6, 2))
-        axes = plt.axes()
-        axes.yaxis.set_visible(False)
-    axes.set_xlabel(keys[-1])
+        plt_axes = plt.axes()
+        plt_axes.yaxis.set_visible(False)
+    plt_axes.set_xlabel(axes[-1])
 
     # Title with dimension sizes
-    plt.title(", ".join(f"Dim[{' '.join(d.keys())} len={len(d)}]" for d in dims))
+    plt.title(", ".join(f"Dim[{' '.join(d.axes())} len={len(d)}]" for d in dims))
 
     # Plot any Regions
     if ndims <= 2:
@@ -129,16 +131,16 @@ def plot_spec(spec: Spec):
                 xy = (region.x_min, region.y_min)
                 width = region.x_max - region.x_min
                 height = region.y_max - region.y_min
-                axes.add_patch(
+                plt_axes.add_patch(
                     patches.Rectangle(xy, width, height, region.angle, fill=False)
                 )
             elif isinstance(region, Circle):
                 xy = (region.x_centre, region.y_centre)
-                axes.add_patch(patches.Circle(xy, region.radius, fill=False))
+                plt_axes.add_patch(patches.Circle(xy, region.radius, fill=False))
 
     # Plot the splines
-    tail: Any = {k: None for k in keys}
-    ranges = [max(np.max(v) - np.min(v), 0.0001) for k, v in dim.positions.items()]
+    tail: Any = {a: None for a in axes}
+    ranges = [max(np.max(v) - np.min(v), 0.0001) for k, v in dim.midpoints.items()]
     seg_col = cycle(colors.TABLEAU_COLORS)
     last_index = 0
     splines = None
@@ -146,21 +148,21 @@ def plot_spec(spec: Spec):
         num_points = index - last_index
         arrays = []
         turnaround = []
-        for k in keys:
-            # Add the lower and positions
+        for a in axes:
+            # Add the midpoints and the lower and upper bounds
             arr = np.empty(num_points * 2 + 1)
-            arr[:-1:2] = dim.lower[k][last_index:index]
-            arr[1::2] = dim.positions[k][last_index:index]
-            arr[-1] = dim.upper[k][index - 1]
+            arr[:-1:2] = dim.lower[a][last_index:index]
+            arr[1::2] = dim.midpoints[a][last_index:index]
+            arr[-1] = dim.upper[a][index - 1]
             arrays.append(arr)
             # Add the turnaround
-            if tail[k] is not None:
+            if tail[a] is not None:
                 # Already had a tail, add lead in points
-                tail[k][2:] = np.linspace(-0.01, 0, 2) * (arr[1] - arr[0]) + arr[0]
-                turnaround.append(tail[k])
+                tail[a][2:] = np.linspace(-0.01, 0, 2) * (arr[1] - arr[0]) + arr[0]
+                turnaround.append(tail[a])
             # Add tail off points
-            tail[k] = np.empty(4)
-            tail[k][:2] = np.linspace(0, 0.01, 2) * (arr[-1] - arr[-2]) + arr[-1]
+            tail[a] = np.empty(4)
+            tail[a][:2] = np.linspace(0, 0.01, 2) * (arr[-1] - arr[-2]) + arr[-1]
         last_index = index
 
         arrow_arr = None
@@ -173,39 +175,39 @@ def plot_spec(spec: Spec):
                 for t in turnaround:
                     t[2] -= (t[2] - t[1]) / 4
             # Plot the turnaround
-            arrow_arr = list(_plot_spline(axes, ranges, turnaround, {0: "lightgrey"}))[
-                0
-            ]
+            arrow_arr = list(
+                _plot_spline(plt_axes, ranges, turnaround, {0: "lightgrey"})
+            )[0]
 
         # Plot the points
         index_colours = {2 * i: next(seg_col) for i in range(num_points)}
-        splines = list(_plot_spline(axes, ranges, arrays, index_colours))
+        splines = list(_plot_spline(plt_axes, ranges, arrays, index_colours))
 
         if arrow_arr:
             # Plot the arrow on the turnaround
-            _plot_arrow(axes, arrow_arr)
+            _plot_arrow(plt_axes, arrow_arr)
         elif splines:
             # Plot the starting arrow in the direction of the first point
             arrow_arr = [(2 * a[0] - a[1], a[0]) for a in splines[0]]
-            _plot_arrow(axes, arrow_arr)
+            _plot_arrow(plt_axes, arrow_arr)
         else:
             # First point isn't moving, put a right caret marker
             _plot_arrays(
-                axes,
-                [np.array([dim.lower[k][0]]) for k in keys],
+                plt_axes,
+                [np.array([dim.lower[a][0]]) for a in axes],
                 marker=5,
                 color="lightgrey",
             )
 
     # Plot the capture points
     if len(dim) < 200:
-        arrays = [dim.positions[k] for k in keys]
-        _plot_arrays(axes, arrays, linestyle="", marker=".", color="k")
+        arrays = [dim.midpoints[a] for a in axes]
+        _plot_arrays(plt_axes, arrays, linestyle="", marker=".", color="k")
 
     # Plot the end
     _plot_arrays(
-        axes,
-        [np.array([dim.upper[k][-1]]) for k in keys],
+        plt_axes,
+        [np.array([dim.upper[a][-1]]) for a in axes],
         marker="x",
         color="lightgrey",
     )

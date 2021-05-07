@@ -41,7 +41,7 @@ For example, on the commandline we might do::
 
     >>> from scanspec.specs import Line
     >>> Line.bounded("x", 0, 1, 5).serialize()
-    {'Line': {'key': 'x', 'start': 0.1, 'stop': 0.9, 'num': 5}}
+    {'Line': {'axis': 'x', 'start': 0.1, 'stop': 0.9, 'num': 5}}
 
 .. seealso:: `serialize-a-spec`
 
@@ -53,7 +53,7 @@ The equivalent in our service is:
         validateSpec(
           spec: {
             BoundedLine: {
-              key: "x"
+              axis: "x"
               lower: 0
               upper: 1
               num: 5
@@ -66,7 +66,7 @@ The equivalent in our service is:
         "data": {
           "validateSpec": {
             "Line": {
-              "key": "x",
+              "axis": "x",
               "start": 0.1,
               "stop": 0.9,
               "num": 5
@@ -78,7 +78,88 @@ The equivalent in our service is:
 Getting Points from a Spec
 --------------------------
 
-TODO
+Most importantly, is the ability to obtain a list of scan points from a Spec. 
+GraphQL gives the user the ability to request one or more fields from an object, 
+allowing them to obtain data that is relevant only to their application.
+
+The 'getPoints' query makes use of this, giving users the ability to select from
+one or more of the following fields:
+
+- numFrames: the total number of frames produced by the Spec
+- returnedFrames (WIP): the number of frames returned, limited by the maxPoint arguement
+- axes: a list of axes present in the Spec and its associated scan points
+
+Within axes:
+- axis: a list of the axes present in the Spec
+- lower: a list of lower bounds that are each present in a frame
+- midpoints: a list of midpoints that are each present in a frame
+- upper: a list of upper bounds that are each present in a frame
+
+Within lower, middle and upper:
+- string: returns the requested points as a string
+- floatList: returns the requested points as a list of floatList
+- b64: returns the requested points encoded into base64
+
+Using the example above, we can request to return points from it:
+
+.. graphiql:: http://localhost:8080/graphql
+    :query:
+      {
+        getPoints(
+          spec: {
+            BoundedLine: {
+              axis: "x"
+              lower: 0
+              upper: 1
+              num: 5
+            }
+          }
+        )
+        {
+          numPoints
+          axes {
+            axis
+            upper {
+              string
+            }
+            midpoints{
+              floatList
+            }
+            lower{
+              b64
+            }
+          }
+        }
+      }
+    :response:
+      {
+        "data": {
+          "getPoints": {
+            "numPoints": 5,
+            "axes": [
+              {
+                "axis": "x",
+                "upper": {
+                  "string": "[0.2 0.4 0.6 0.8 1. ]"
+                },
+                "midpoints": {
+                  "floatList": [
+                    0.1,
+                    0.30000000000000004,
+                    0.5,
+                    0.7000000000000001,
+                    0.9
+                  ]
+                },
+                "lower": {
+                  "b64": "AAAAAAAAAACamZmZmZnJP5qZmZmZmdk/NDMzMzMz4z+amZmZmZnpPw=="
+                }
+              }
+            ]
+          }
+        }
+      }
+
 
 Content to move
 ---------------

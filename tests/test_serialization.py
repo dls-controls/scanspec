@@ -7,7 +7,7 @@ from scanspec.specs import Line, Mask, Spec, Spiral
 
 def test_line_serializes() -> None:
     ob = Line("x", 0, 1, 4)
-    serialized = {"Line": {"key": "x", "start": 0.0, "stop": 1.0, "num": 4}}
+    serialized = {"Line": {"axis": "x", "start": 0.0, "stop": 1.0, "num": 4}}
     assert ob.serialize() == serialized
     assert Spec.deserialize(serialized) == ob
 
@@ -16,11 +16,11 @@ def test_masked_circle_serializes() -> None:
     ob = Mask(Line("x", 0, 1, 4), Circle("x", "y", x_centre=0, y_centre=1, radius=4))
     serialized = {
         "Mask": {
-            "spec": {"Line": {"key": "x", "start": 0, "stop": 1, "num": 4}},
+            "spec": {"Line": {"axis": "x", "start": 0, "stop": 1, "num": 4}},
             "region": {
                 "Circle": {
-                    "x_key": "x",
-                    "y_key": "y",
+                    "x_axis_name": "x",
+                    "y_axis_name": "y",
                     "x_centre": 0,
                     "y_centre": 1,
                     "radius": 4,
@@ -40,14 +40,14 @@ def test_product_lines_serializes() -> None:
             "outer": {
                 "Product": {
                     "outer": {
-                        "Line": {"key": "z", "start": 4.0, "stop": 5.0, "num": 6},
+                        "Line": {"axis": "z", "start": 4.0, "stop": 5.0, "num": 6},
                     },
                     "inner": {
-                        "Line": {"key": "y", "start": 2.0, "stop": 3.0, "num": 5}
+                        "Line": {"axis": "y", "start": 2.0, "stop": 3.0, "num": 5}
                     },
                 }
             },
-            "inner": {"Line": {"key": "x", "start": 0.0, "stop": 1.0, "num": 4}},
+            "inner": {"Line": {"axis": "x", "start": 0.0, "stop": 1.0, "num": 4}},
         }
     }
     assert ob.serialize() == serialized
@@ -66,8 +66,8 @@ def test_complex_nested_serializes() -> None:
         "Mask": {
             "spec": {
                 "Spiral": {
-                    "x_key": "x",
-                    "y_key": "y",
+                    "x_axis_name": "x",
+                    "y_axis_name": "y",
                     "x_start": 0,
                     "y_start": 0,
                     "x_range": 20,
@@ -80,8 +80,8 @@ def test_complex_nested_serializes() -> None:
                 "UnionOf": {
                     "left": {
                         "Circle": {
-                            "x_key": "x",
-                            "y_key": "y",
+                            "x_axis_name": "x",
+                            "y_axis_name": "y",
                             "x_centre": 0,
                             "y_centre": 1,
                             "radius": 4,
@@ -89,8 +89,8 @@ def test_complex_nested_serializes() -> None:
                     },
                     "right": {
                         "Rectangle": {
-                            "x_key": "x",
-                            "y_key": "y",
+                            "x_axis_name": "x",
+                            "y_axis_name": "y",
                             "x_min": 0,
                             "y_min": 1.1,
                             "x_max": 1.5,
@@ -110,6 +110,6 @@ def test_complex_nested_serializes() -> None:
 def test_extra_arg_fails() -> None:
     with pytest.raises(ValidationError):
         serialized = {
-            "Line": {"key": "x", "start": 0.0, "stop": 1.0, "num": 4, "foo": "bar"}
+            "Line": {"axis": "x", "start": 0.0, "stop": 1.0, "num": 4, "foo": "bar"}
         }
         Spec.deserialize(serialized)

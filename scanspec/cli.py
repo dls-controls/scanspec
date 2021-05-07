@@ -48,3 +48,11 @@ def service(cors):
     from scanspec.service import run_app
 
     run_app(cors)
+
+
+@cli.command()
+def schema():
+    """Print schema"""
+    from scanspec.service import schema_text
+
+    click.echo(schema_text())

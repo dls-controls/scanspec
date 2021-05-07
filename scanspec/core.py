@@ -12,12 +12,14 @@ from typing import (
 )
 
 import numpy as np
-from apischema import deserialize, deserializer, schema_ref, serialize
+from apischema import deserialize, schema_ref, serialize
 from apischema.conversions import (
     Conversion,
     dataclass_input_wrapper,
+    deserializer,
     identity,
     reset_deserializers,
+    serializer,
 )
 from apischema.conversions.converters import serializer
 from apischema.metadata import conversion
@@ -26,6 +28,17 @@ from typing_extensions import Annotated
 
 #: The type of class the function will return
 T = TypeVar("T")
+
+__all__ = [
+    "Serializable",
+    "T",
+    "AxesPoints",
+    "if_instance_do",
+    "Dimension",
+    "squash_dimensions",
+    "Path",
+    "Midpoints",
+]
 
 
 # Recursive implementation of type.__subclasses__
@@ -158,9 +171,9 @@ class Serializable:
         return deserialize(cls, serialization)
 
 
-#: Map of positions keys to positions_ndarray
+#: Map of axes to points_ndarray
 #: E.g. {xmotor: array([0, 1, 2]), ymotor: array([2, 2, 2])}
-Positions = Dict[Any, np.ndarray]
+AxesPoints = Dict[str, np.ndarray]
 
 
 def if_instance_do(x, cls: Type[T], func: Callable[[T], Any]):
@@ -173,16 +186,19 @@ def if_instance_do(x, cls: Type[T], func: Callable[[T], Any]):
 
 
 class Dimension:
-    """Represents a linear stack of positions and bounds. A list of Dimensions
+    """A dimension is a repeatable, possibly snaking structure of frames along a
+    number of axes.
+
+    Represents a linear stack of frames. A list of Dimensions
     is interpreted as nested from slowest moving to fastest moving, so each
     faster Dimension will iterate once per position of the slower Dimension.
-    When fly-scanning they key will traverse lower-position-upper on the fastest
+    When fly-scanning the axis will traverse lower-midpoints-upper on the fastest
     Dimension for each point in the scan.
 
     Args:
-        positions: The centre positions of the scan for each key
-        lower: Lower bounds if different from positions
-        upper: Upper bounds if different from positions
+        midpoints: The centre points of the scan for each axis
+        lower: Lower bounds if different from midpoints
+        upper: Upper bounds if different from midpoints
         snake: If True then every other iteration of this Dimension within a
             slower moving Dimension will be reversed
 
@@ -192,53 +208,53 @@ class Dimension:
 
     def __init__(
         self,
-        positions: Positions,
-        lower: Positions = None,
-        upper: Positions = None,
+        midpoints: AxesPoints,
+        lower: AxesPoints = None,
+        upper: AxesPoints = None,
         snake: bool = False,
     ):
-        #: The centre positions of the scan for each key
-        self.positions = positions
-        #: The lower bounds of each scan point for each key for fly-scanning
-        self.lower = lower or positions
-        #: The upper bounds of each scan point for each key for fly-scanning
-        self.upper = upper or positions
+        #: The centre points of the scan for each axis
+        self.midpoints = midpoints
+        #: The lower bounds of each scan point in each axis for fly-scanning
+        self.lower = lower or midpoints
+        #: The upper bounds of each scan point in each axis for fly-scanning
+        self.upper = upper or midpoints
         #: Whether every other iteration of this Dimension within a slower
         #: moving Dimension will be reversed
         self.snake = snake
-        # Check all keys and ordering are the same
-        assert list(self.positions) == list(self.lower) == list(self.upper), (
-            f"Mismatching keys "
-            f"{list(self.positions)} != {list(self.lower)} != {list(self.upper)}"
+        # Check all axes and ordering are the same
+        assert list(self.midpoints) == list(self.lower) == list(self.upper), (
+            f"Mismatching axes "
+            f"{list(self.midpoints)} != {list(self.lower)} != {list(self.upper)}"
         )
         # Check all lengths are the same
         lengths = set(
             len(arr)
-            for d in (self.positions, self.lower, self.upper)
+            for d in (self.midpoints, self.lower, self.upper)
             for arr in d.values()
         )
         assert len(lengths) <= 1, f"Mismatching lengths {list(lengths)}"
 
-    def keys(self) -> List:
-        """The keys that are present in `positions`, `lower` and `upper`
+    def axes(self) -> List:
+        """The axes that are present in `midpoints`, `lower` and `upper`
         which will move during the scan"""
-        return list(self.positions.keys())
+        return list(self.midpoints.keys())
 
     def __len__(self) -> int:
-        """The number of `positions` in the scan"""
-        # All positions arrays are same length, pick the first one
-        return len(list(self.positions.values())[0])
+        """The number of `frames` in the scan"""
+        # All axespoints arrays are same length, pick the first one
+        return len(list(self.midpoints.values())[0])
 
     def _dim_with(self, func: Callable[[str, Any], np.ndarray]) -> "Dimension":
         def apply_func(a: str):
             return {k: func(a, k) for k in getattr(self, a)}
 
-        # Apply to every array in positions
-        kwargs = dict(positions=apply_func("positions"), snake=self.snake)
+        # Apply to every array in axes
+        kwargs = dict(midpoints=apply_func("midpoints"), snake=self.snake)
         # If lower and upper are different, apply to those too
-        if self.lower is not self.positions:
+        if self.lower is not self.midpoints:
             kwargs["lower"] = apply_func("lower")
-        if self.upper is not self.positions:
+        if self.upper is not self.midpoints:
             kwargs["upper"] = apply_func("upper")
         return Dimension(**kwargs)
 
@@ -246,7 +262,7 @@ class Dimension:
         """Return a new Dimension that iterates self reps times
 
         >>> dim = Dimension({"x": np.array([1, 2, 3])})
-        >>> dim.tile(reps=2).positions
+        >>> dim.tile(reps=2).midpoints
         {'x': array([1, 2, 3, 1, 2, 3])}
         """
         return self._dim_with(lambda a, k: np.tile(getattr(self, a)[k], reps))
@@ -255,7 +271,7 @@ class Dimension:
         """Return a new Dimension that repeats each point in self reps times
 
         >>> dim = Dimension({"x": np.array([1, 2, 3])})
-        >>> dim.repeat(reps=2).positions
+        >>> dim.repeat(reps=2).midpoints
         {'x': array([1, 1, 2, 2, 3, 3])}
         """
         return self._dim_with(lambda a, k: np.repeat(getattr(self, a)[k], reps))
@@ -265,7 +281,7 @@ class Dimension:
         mask
 
         >>> dim = Dimension({"x": np.array([1, 2, 3])})
-        >>> dim.mask(np.array([1, 0, 1])).positions
+        >>> dim.mask(np.array([1, 0, 1])).midpoints
         {'x': array([1, 3])}
         """
         indices = mask.nonzero()[0]
@@ -282,36 +298,36 @@ class Dimension:
 
     def concat(self, other: "Dimension") -> "Dimension":
         """Return a new Dimension with arrays from self and other concatenated
-        together. Require both Dimensions to have the same keys and snake
+        together. Require both Dimensions to have the same axes and snake
         settings
 
         >>> dim = Dimension({"x": np.array([1, 2, 3])})
         >>> dim2 = Dimension({"x": np.array([5, 6, 7])})
-        >>> dim.concat(dim2).positions
+        >>> dim.concat(dim2).midpoints
         {'x': array([1, 2, 3, 5, 6, 7])}
         """
         self._check_dim(other)
-        assert self.keys() == other.keys(), f"Keys {self.keys()} != {other.keys()}"
+        assert self.axes() == other.axes(), f"axes {self.axes()} != {other.axes()}"
         return self._dim_with(
             lambda a, k: np.concatenate((getattr(self, a)[k], getattr(other, a)[k]))
         )
 
     def zip(self, other: "Dimension") -> "Dimension":
-        """Return a new Dimension with arrays from keys of self and other
-        merged together. Require both Dimensions to not share keys, and
+        """Return a new Dimension with arrays from axes of self and other
+        merged together. Require both Dimensions to not share axes, and
         to have the snake settings
 
         >>> dimx = Dimension({"x": np.array([1, 2, 3])})
         >>> dimy = Dimension({"y": np.array([5, 6, 7])})
-        >>> dimx.zip(dimy).positions
+        >>> dimx.zip(dimy).midpoints
         {'x': array([1, 2, 3]), 'y': array([5, 6, 7])}
         """
         self._check_dim(other)
-        overlapping = list(set(self.keys()).intersection(other.keys()))
-        assert not overlapping, f"Zipping would overwrite keys {overlapping}"
+        overlapping = list(set(self.axes()).intersection(other.axes()))
+        assert not overlapping, f"Zipping would overwrite axes {overlapping}"
         # rely on the constructor to check lengths
         dim = Dimension(
-            positions={**self.positions, **other.positions},
+            midpoints={**self.midpoints, **other.midpoints},
             lower={**self.lower, **other.lower},
             upper={**self.upper, **other.upper},
             snake=self.snake,
@@ -335,7 +351,7 @@ def squash_dimensions(
 
     >>> dimx = Dimension({"x": np.array([1, 2])}, snake=True)
     >>> dimy = Dimension({"y": np.array([3, 4])})
-    >>> squash_dimensions([dimy, dimx]).positions
+    >>> squash_dimensions([dimy, dimx]).midpoints
     {'y': array([3, 3, 4, 4]), 'x': array([1, 2, 2, 1])}
     """
     path = Path(dimensions)
@@ -349,7 +365,7 @@ def squash_dimensions(
         # This means any non-snaking axes will run backwards, which is
         # surprising, so don't allow it
         if check_path_changes:
-            non_snaking = [k for d in dimensions for k in d.keys() if not d.snake]
+            non_snaking = [k for d in dimensions for k in d.axes() if not d.snake]
             if non_snaking:
                 raise ValueError(
                     f"Cannot squash non-snaking Specs in a snaking Dimension "
@@ -366,14 +382,14 @@ def squash_dimensions(
                 raise ValueError(
                     f"Cannot squash snaking Specs in a non-snaking Dimension "
                     f"when they do not repeat an even number of times "
-                    f"otherwise {dim.keys()} would jump in position"
+                    f"otherwise {dim.axes()} would jump in position"
                 )
     return squashed
 
 
 class Path:
-    """Create a consumable Path through a list of Dimensions representing a
-    scan path.
+    """A path is a consumable route through one or more dimensions,
+    representing a scan path.
 
     Args:
         dimensions: The Dimensions describing the scan, from slowest to fastest
@@ -406,11 +422,11 @@ class Path:
         >>> dimx = Dimension({"x": np.array([1, 2])}, snake=True)
         >>> dimy = Dimension({"y": np.array([3, 4])})
         >>> path = Path([dimy, dimx])
-        >>> path.consume(3).positions
+        >>> path.consume(3).midpoints
         {'y': array([3, 3, 4]), 'x': array([1, 2, 2])}
-        >>> path.consume(3).positions
+        >>> path.consume(3).midpoints
         {'y': array([4]), 'x': array([1])}
-        >>> path.consume(3).positions
+        >>> path.consume(3).midpoints
         {'y': array([], dtype=int64), 'x': array([], dtype=int64)}
         """
         if num is None:
@@ -419,12 +435,12 @@ class Path:
             end_index = min(self.index + num, self.end_index)
         indices = np.arange(self.index, end_index)
         self.index = end_index
-        positions, lower, upper = {}, {}, {}
+        midpoints, lower, upper = {}, {}, {}
         if len(indices) > 0:
             self.index = indices[-1] + 1
         # Example numbers below from a 2x3x4 ZxYxX scan
         for i, dim in enumerate(self.dimensions):
-            # Number of times each position will repeat: Z:12, Y:4, X:1
+            # Number of times each point will repeat: Z:12, Y:4, X:1
             repeats = np.product(self._lengths[i + 1 :])
             # How big is this dim: Z:2, Y:3, X:4
             dim_len = self._lengths[i]
@@ -446,33 +462,33 @@ class Path:
                 snake_indices = np.where(
                     backwards, dim_len - 1 - dim_indices, dim_indices
                 )
-                for key in dim.keys():
-                    positions[key] = dim.positions[key][snake_indices]
+                for axis in dim.axes():
+                    midpoints[axis] = dim.midpoints[axis][snake_indices]
                     # If going backwards, select from the opposite bound
-                    lower[key] = np.where(
+                    lower[axis] = np.where(
                         backwards,
-                        dim.upper[key][snake_indices],
-                        dim.lower[key][snake_indices],
+                        dim.upper[axis][snake_indices],
+                        dim.lower[axis][snake_indices],
                     )
-                    upper[key] = np.where(
+                    upper[axis] = np.where(
                         backwards,
-                        dim.lower[key][snake_indices],
-                        dim.upper[key][snake_indices],
+                        dim.lower[axis][snake_indices],
+                        dim.upper[axis][snake_indices],
                     )
             else:
-                for key in dim.keys():
-                    positions[key] = dim.positions[key][dim_indices]
-                    lower[key] = dim.lower[key][dim_indices]
-                    upper[key] = dim.upper[key][dim_indices]
-        return Dimension(positions, lower, upper)
+                for axis in dim.axes():
+                    midpoints[axis] = dim.midpoints[axis][dim_indices]
+                    lower[axis] = dim.lower[axis][dim_indices]
+                    upper[axis] = dim.upper[axis][dim_indices]
+        return Dimension(midpoints, lower, upper)
 
     def __len__(self) -> int:
         """Number of points left in a scan, reduces when `consume` is called"""
         return self.end_index - self.index
 
 
-class SpecPositions:
-    """Convenience iterable that produces the scan positions for each axis. For
+class Midpoints:
+    """Convenience iterable that produces the scan points for each axis. For
     better performance, consume from a `Path` instead.
 
     Args:
@@ -484,8 +500,8 @@ class SpecPositions:
 
     >>> dimx = Dimension({"x": np.array([1, 2])}, snake=True)
     >>> dimy = Dimension({"y": np.array([3, 4])})
-    >>> sp = SpecPositions([dimy, dimx])
-    >>> for p in sp: print(p)
+    >>> mp = Midpoints([dimy, dimx])
+    >>> for p in mp: print(p)
     {'y': 3, 'x': 1}
     {'y': 3, 'x': 2}
     {'y': 4, 'x': 2}
@@ -497,19 +513,19 @@ class SpecPositions:
         self.dimensions = dimensions
 
     @property
-    def keys(self) -> List:
-        """The keys that will be present in each position dictionary"""
-        keys = []
+    def axes(self) -> List:
+        """The axes that will be present in each points dictionary"""
+        axes = []
         for dim in self.dimensions:
-            keys += dim.keys()
-        return keys
+            axes += dim.axes()
+        return axes
 
     def __len__(self) -> int:
         """The number of dictionaries that will be produced if iterated over"""
         return np.product([len(dim) for dim in self.dimensions])
 
-    def __iter__(self) -> Iterator[Positions]:
+    def __iter__(self) -> Iterator[AxesPoints]:
         path = Path(self.dimensions)
         while len(path):
             dim = path.consume(1)
-            yield {k: dim.positions[k][0] for k in dim.keys()}
+            yield {a: dim.midpoints[a][0] for a in dim.axes()}

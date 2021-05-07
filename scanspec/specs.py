@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, TypeVar
+from typing import Callable, Dict, List, Optional, TypeVar
 
 import numpy as np
 from apischema import schema
@@ -7,9 +7,9 @@ from typing_extensions import Annotated
 
 from .core import (
     Dimension,
+    Midpoints,
     Path,
     Serializable,
-    SpecPositions,
     alternative_constructor,
     if_instance_do,
     squash_dimensions,
@@ -18,37 +18,58 @@ from .regions import Region, get_mask
 
 T = TypeVar("T")
 
+__all__ = [
+    "Spec",
+    "Product",
+    "Zip",
+    "Mask",
+    "Snake",
+    "Concat",
+    "Squash",
+    "Line",
+    "Static",
+    "Spiral",
+    "TIME",
+    "REPEAT",
+    "fly",
+    "step",
+    "repeat",
+]
+
 
 @dataclass
 class Spec(Serializable):
-    """Abstract baseclass for the specification of a scan. Supports operators:
+    """Definition: A spec is a serializable representation of the type, parameters
+    and axis names required to produce one or more dimensions.
+
+    Description: Abstract baseclass for the specification of a scan. Supports operators:
 
     - ``*``: Outer `Product` of two Specs, nesting the second within the first
     - ``+``: `Zip` two Specs together, iterating in tandem
-    - ``&``: `Mask` the Spec with a `Region`, excluding positions outside it
+    - ``&``: `Mask` the Spec with a `Region`, excluding midpoints outside of it
     - ``~``: `Snake` the Spec, reversing every other iteration of it
     """
 
-    def keys(self) -> List:
-        """Return the list of keys that are present in the positions, from
+    def axes(self) -> List:
+        """Return the list of axes that are present in the scan, from
         slowest moving to fastest moving"""
         raise NotImplementedError(self)
 
     def create_dimensions(self, bounds=True, nested=False) -> List[Dimension]:
         """Implemented by subclasses to produce the `Dimension` list that
-        contribute to positions, from slowest moving to fastest moving"""
+        contribute to midpoints, from slowest moving to fastest moving"""
         raise NotImplementedError(self)
 
     def path(self) -> Path:
         """Return a `Path` through the scan that can be consumed in chunks
-        to give positions and bounds"""
+        to give midpoints and bounds"""
         path = Path(self.create_dimensions())
         return path
 
-    def positions(self) -> SpecPositions:
-        """Return a `SpecPositions` that can be iterated position by position"""
-        sp = SpecPositions(self.create_dimensions(bounds=False))
-        return sp
+    def midpoints(self) -> Midpoints:
+        """Return `Midpoints` that can be iterated point by point"""
+        mp = Midpoints(self.create_dimensions(bounds=False))
+        return mp
 
     def __mul__(self, other) -> "Product":
         return if_instance_do(other, Spec, lambda o: Product(self, o))
@@ -80,8 +101,8 @@ class Product(Spec):
         metadata=schema(description="Will be executed len(outer) times")
     )
 
-    def keys(self) -> List:
-        return self.outer.keys() + self.inner.keys()
+    def axes(self) -> List:
+        return self.outer.axes() + self.inner.axes()
 
     def create_dimensions(self, bounds=True, nested=False) -> List[Dimension]:
         dims_outer = self.outer.create_dimensions(bounds=False, nested=nested)
@@ -91,7 +112,7 @@ class Product(Spec):
 
 @dataclass
 class Zip(Spec):
-    """Run two Specs in parallel, merging their positions together. Typically
+    """Run two Specs in parallel, merging their midpoints together. Typically
     formed using the ``+`` operator.
 
     Dimensions are merged by:
@@ -113,17 +134,17 @@ class Zip(Spec):
 
     left: Spec = field(
         metadata=schema(
-            description="The left-hand Spec to Zip, will appear earlier in keys"
+            description="The left-hand Spec to Zip, will appear earlier in axes"
         )
     )
     right: Spec = field(
         metadata=schema(
-            description="The right-hand Spec to Zip, will appear later in keys"
+            description="The right-hand Spec to Zip, will appear later in axes"
         )
     )
 
-    def keys(self) -> List:
-        return self.left.keys() + self.right.keys()
+    def axes(self) -> List:
+        return self.left.axes() + self.right.axes()
 
     def create_dimensions(self, bounds=True, nested=False) -> List[Dimension]:
         dims_left = self.left.create_dimensions(bounds, nested)
@@ -160,7 +181,7 @@ class Zip(Spec):
 
 @dataclass
 class Mask(Spec):
-    """Restrict the given Spec to only the positions that fall inside the given
+    """Restrict the given Spec to only the midpoints that fall inside of the given
     Region.
 
     Typically created with the ``&`` operator. It also pushes down the
@@ -182,10 +203,10 @@ class Mask(Spec):
     """
 
     spec: Spec = field(
-        metadata=schema(description="The Spec containing the source positions")
+        metadata=schema(description="The Spec containing the source midpoints")
     )
     region: Region = field(
-        metadata=schema(description="The Region that positions will be inside")
+        metadata=schema(description="The Region that midpoints will be inside")
     )
     check_path_changes: bool = field(
         default=True,
@@ -194,25 +215,25 @@ class Mask(Spec):
         ),
     )
 
-    def keys(self) -> List:
-        return self.spec.keys()
+    def axes(self) -> List:
+        return self.spec.axes()
 
     def create_dimensions(self, bounds=True, nested=False) -> List[Dimension]:
         dims = self.spec.create_dimensions(bounds, nested)
-        for key_set in self.region.key_sets():
-            # Find the start and end index of any dimensions containing these keys
-            matches = [i for i, d in enumerate(dims) if set(d.keys()) & key_set]
-            assert matches, f"No Specs match keys {list(key_set)}"
+        for axis_set in self.region.axis_sets():
+            # Find the start and end index of any dimensions containing these axes
+            matches = [i for i, d in enumerate(dims) if set(d.axes()) & axis_set]
+            assert matches, f"No Specs match axes {list(axis_set)}"
             si, ei = matches[0], matches[-1]
             if si != ei:
-                # The key_set spans multiple Dimensions, squash them together
+                # The axis_set spans multiple Dimensions, squash them together
                 # If the spec to be squashed is nested (inside the Mask or outside)
                 # then check the path changes if requested
                 check_path_changes = (nested or si) and self.check_path_changes
                 squashed = squash_dimensions(dims[si : ei + 1], check_path_changes)
                 dims = dims[:si] + [squashed] + dims[ei + 1 :]
-        # Generate masks from the positions showing what's inside
-        masked_dims = [dim.mask(get_mask(self.region, dim.positions)) for dim in dims]
+        # Generate masks from the midpoints showing what's inside
+        masked_dims = [dim.mask(get_mask(self.region, dim.midpoints)) for dim in dims]
         return masked_dims
 
     # *+ bind more tightly than &|^ so without these overrides we
@@ -248,8 +269,8 @@ class Snake(Spec):
         metadata=schema(description="The Spec to run in reverse every other iteration")
     )
 
-    def keys(self) -> List:
-        return self.spec.keys()
+    def axes(self) -> List:
+        return self.spec.axes()
 
     def create_dimensions(self, bounds=True, nested=False) -> List[Dimension]:
         dims = self.spec.create_dimensions(bounds, nested)
@@ -261,7 +282,7 @@ class Snake(Spec):
 @dataclass
 class Concat(Spec):
     """Concatenate two Specs together, running one after the other. Each Dimension
-    of left and right must contain the same keys.
+    of left and right must contain the same axes.
 
     .. example_spec::
 
@@ -272,19 +293,19 @@ class Concat(Spec):
 
     left: Spec = field(
         metadata=schema(
-            description="The left-hand Spec to Zip, positions will appear earlier"
+            description="The left-hand Spec to Zip, midpoints will appear earlier"
         )
     )
     right: Spec = field(
         metadata=schema(
-            description="The right-hand Spec to Zip, positions will appear later"
+            description="The right-hand Spec to Zip, midpoints will appear later"
         )
     )
 
-    def keys(self) -> List:
-        left_keys, right_keys = self.left.keys(), self.right.keys()
-        assert left_keys == right_keys, f"Keys {left_keys} != {right_keys}"
-        return left_keys
+    def axes(self) -> List:
+        left_axes, right_axes = self.left.axes(), self.right.axes()
+        assert left_axes == right_axes, f"axes {left_axes} != {right_axes}"
+        return left_axes
 
     def create_dimensions(self, bounds=True, nested=False) -> List[Dimension]:
         dims_left = self.left.create_dimensions(bounds, nested)
@@ -298,7 +319,7 @@ class Concat(Spec):
 
 @dataclass
 class Squash(Spec):
-    """Squash the Dimensions together of the scan (but not positions) into one
+    """Squash the Dimensions together of the scan (but not the midpoints) into one
     linear stack.
 
     See Also:
@@ -321,8 +342,8 @@ class Squash(Spec):
         ),
     )
 
-    def keys(self) -> List:
-        return self.spec.keys()
+    def axes(self) -> List:
+        return self.spec.axes()
 
     def create_dimensions(self, bounds=True, nested=False) -> List[Dimension]:
         # TODO: if we squash we explode the size, can we avoid this?
@@ -332,28 +353,28 @@ class Squash(Spec):
 
 
 def _dimensions_from_indexes(
-    func: Callable[[np.ndarray], Dict[Any, np.ndarray]],
-    keys: List,
+    func: Callable[[np.ndarray], Dict[str, np.ndarray]],
+    axes: List,
     num: int,
     bounds: bool,
 ) -> List[Dimension]:
-    # Calc num positions (fences) from 0.5 .. num - 0.5
-    positions_calc = func(np.linspace(0.5, num - 0.5, num))
-    positions = {k: positions_calc[k] for k in keys}
+    # Calc num midpoints (fences) from 0.5 .. num - 0.5
+    midpoints_calc = func(np.linspace(0.5, num - 0.5, num))
+    midpoints = {a: midpoints_calc[a] for a in axes}
     if bounds:
         # Calc num + 1 bounds (posts) from 0 .. num
         bounds_calc = func(np.linspace(0, num, num + 1))
-        lower = {k: bounds_calc[k][:-1] for k in keys}
-        upper = {k: bounds_calc[k][1:] for k in keys}
-        dimension = Dimension(positions, lower, upper)
+        lower = {a: bounds_calc[a][:-1] for a in axes}
+        upper = {a: bounds_calc[a][1:] for a in axes}
+        dimension = Dimension(midpoints, lower, upper)
     else:
-        dimension = Dimension(positions)
+        dimension = Dimension(midpoints)
     return [dimension]
 
 
 @dataclass
 class Line(Spec):
-    """Linearly spaced points in the given key, with first and last points
+    """Linearly spaced points in the given axis, with first and last points
     centred on start and stop.
 
     .. example_spec::
@@ -363,7 +384,7 @@ class Line(Spec):
         spec = Line("x", 1, 2, 5)
     """
 
-    key: Any = field(metadata=schema(description="An identifier for what to move"))
+    axis: str = field(metadata=schema(description="An identifier for what to move"))
     start: float = field(
         metadata=schema(description="Centre point of the first point of the line")
     )
@@ -372,10 +393,10 @@ class Line(Spec):
     )
     num: int = field(metadata=schema(min=1, description="Number of points to produce"))
 
-    def keys(self) -> List:
-        return [self.key]
+    def axes(self) -> List:
+        return [self.axis]
 
-    def _line_from_indexes(self, indexes: np.ndarray) -> Dict[Any, np.ndarray]:
+    def _line_from_indexes(self, indexes: np.ndarray) -> Dict[str, np.ndarray]:
         if self.num == 1:
             # Only one point, stop-start gives length of one point
             step = self.stop - self.start
@@ -385,16 +406,16 @@ class Line(Spec):
         # self.start is the first centre point, but we need the lower bound
         # of the first point as this is where the index array starts
         first = self.start - step / 2
-        return {self.key: indexes * step + first}
+        return {self.axis: indexes * step + first}
 
     def create_dimensions(self, bounds=True, nested=False) -> List[Dimension]:
         return _dimensions_from_indexes(
-            self._line_from_indexes, self.keys(), self.num, bounds
+            self._line_from_indexes, self.axes(), self.num, bounds
         )
 
     @alternative_constructor
     def bounded(
-        key: Annotated[Any, schema(description="An identifier for what to move")],
+        axis: Annotated[str, schema(description="An identifier for what to move")],
         lower: Annotated[
             float, schema(description="Lower bound of the first point of the line")
         ],
@@ -419,13 +440,13 @@ class Line(Spec):
         else:
             # Many points, stop will be produced
             stop = upper - half_step
-        return Line(key, start, stop, num)
+        return Line(axis, start, stop, num)
 
 
 @dataclass
 class Static(Spec):
-    """A static point, repeated "num" times, with "key" at "value". Can
-    be used to set key=value at every point in a scan.
+    """A static point, repeated "num" times, with "axis" at "value". Can
+    be used to set axis=value at every point in a scan.
 
     .. example_spec::
 
@@ -434,28 +455,28 @@ class Static(Spec):
         spec = Line("y", 1, 2, 3) + Static("x", 3)
     """
 
-    key: Any = field(metadata=schema(description="An identifier for what to move"))
+    axis: str = field(metadata=schema(description="An identifier for what to move"))
     value: float = field(metadata=schema(description="The value at each point"))
     num: int = field(
         default=1,
         metadata=schema(min=1, description="How many times to repeat this point"),
     )
 
-    def keys(self) -> List:
-        return [self.key]
+    def axes(self) -> List:
+        return [self.axis]
 
-    def _repeats_from_indexes(self, indexes: np.ndarray) -> Dict[Any, np.ndarray]:
-        return {self.key: np.full(len(indexes), self.value)}
+    def _repeats_from_indexes(self, indexes: np.ndarray) -> Dict[str, np.ndarray]:
+        return {self.axis: np.full(len(indexes), self.value)}
 
     def create_dimensions(self, bounds=True, nested=False) -> List[Dimension]:
         return _dimensions_from_indexes(
-            self._repeats_from_indexes, self.keys(), self.num, bounds
+            self._repeats_from_indexes, self.axes(), self.num, bounds
         )
 
 
 @dataclass
 class Spiral(Spec):
-    """Archimedean spiral of "x_key" and "y_key", starting at centre point
+    """Archimedean spiral of "x_axis_name" and "y_axis_name", starting at centre point
     ("x_start", "y_start") with angle "rotate". Produces "num" points
     in a spiral spanning width of "x_range" and height of "y_range"
 
@@ -466,10 +487,10 @@ class Spiral(Spec):
         spec = Spiral("x", "y", 1, 5, 10, 50, 30)
     """
 
-    x_key: Any = field(
+    x_axis_name: str = field(
         metadata=schema(description="An identifier for what to move for x")
     )
-    y_key: Any = field(
+    y_axis_name: str = field(
         metadata=schema(description="An identifier for what to move for y")
     )
     # TODO: do we like these names?
@@ -483,11 +504,11 @@ class Spiral(Spec):
         metadata=schema(description="How much to rotate the angle of the spiral"),
     )
 
-    def keys(self) -> List:
+    def axes(self) -> List:
         # TODO: reversed from __init__ args, a good idea?
-        return [self.y_key, self.x_key]
+        return [self.y_axis_name, self.x_axis_name]
 
-    def _spiral_from_indexes(self, indexes: np.ndarray) -> Dict[Any, np.ndarray]:
+    def _spiral_from_indexes(self, indexes: np.ndarray) -> Dict[str, np.ndarray]:
         # simplest spiral equation: r = phi
         # we want point spacing across area to be the same as between rings
         # so: sqrt(area / num) = ring_spacing
@@ -500,22 +521,22 @@ class Spiral(Spec):
         x_scale = self.x_range / diameter
         y_scale = self.y_range / diameter
         return {
-            self.y_key: self.y_start + y_scale * phi * np.cos(phi + self.rotate),
-            self.x_key: self.x_start + x_scale * phi * np.sin(phi + self.rotate),
+            self.y_axis_name: self.y_start + y_scale * phi * np.cos(phi + self.rotate),
+            self.x_axis_name: self.x_start + x_scale * phi * np.sin(phi + self.rotate),
         }
 
     def create_dimensions(self, bounds=True, nested=False) -> List[Dimension]:
         return _dimensions_from_indexes(
-            self._spiral_from_indexes, self.keys(), self.num, bounds
+            self._spiral_from_indexes, self.axes(), self.num, bounds
         )
 
     @alternative_constructor
     def spaced(
-        x_key: Annotated[
-            Any, schema(description="An identifier for what to move for x")
+        x_axis_name: Annotated[
+            str, schema(description="An identifier for what to move for x")
         ],
-        y_key: Annotated[
-            Any, schema(description="An identifier for what to move for y")
+        y_axis_name: Annotated[
+            str, schema(description="An identifier for what to move for y")
         ],
         x_start: Annotated[float, schema(description="x centre of the spiral")],
         y_start: Annotated[float, schema(description="y centre of the spiral")],
@@ -528,7 +549,7 @@ class Spiral(Spec):
             ),
         ] = 0.0,
     ) -> "Spiral":
-        """Specify a Spiral equally spaced in "x_key" and "y_key" by specifying
+        """Specify a Spiral equally spaced in "x_axis_name" and "y_axis_name" by specifying
         the "radius" and difference between each ring of the spiral "dr"
 
         .. example_spec::
@@ -544,7 +565,14 @@ class Spiral(Spec):
         n_rings = radius / dr
         num = int(n_rings ** 2 * np.pi)
         return Spiral(
-            x_key, y_key, x_start, y_start, radius * 2, radius * 2, num, rotate
+            x_axis_name,
+            y_axis_name,
+            x_start,
+            y_start,
+            radius * 2,
+            radius * 2,
+            num,
+            rotate,
         )
 
 
@@ -557,7 +585,7 @@ REPEAT = "REPEAT"
 
 
 def fly(spec: Spec, duration: float) -> Spec:
-    """Flyscan, zipping TIME=duration for every position
+    """Flyscan, zipping TIME=duration for every frame
 
     Args:
         spec: The source `Spec` to continuously move
@@ -574,10 +602,10 @@ def fly(spec: Spec, duration: float) -> Spec:
 
 def step(spec: Spec, duration: float, num: int = 1):
     """Step scan, adding num x TIME=duration as an inner dimension for
-    every position
+    every midpoint
 
     Args:
-        spec: The source `Spec` with positions to move to and stop
+        spec: The source `Spec` with midpoints to move to and stop
         duration: The duration of each scan point
         num: Number of points to produce with given duration at each of point
             in the spec
