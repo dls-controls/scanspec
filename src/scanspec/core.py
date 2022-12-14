@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import is_dataclass
+from types import new_class
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -14,9 +16,13 @@ from typing import (
     Sequence,
     Type,
     TypeVar,
+    Union,
 )
 
 import numpy as np
+from pydantic import ConfigDict, Field
+from pydantic.dataclasses import dataclass
+from typing_extensions import Literal, get_args
 
 __all__ = [
     "if_instance_do",
@@ -28,6 +34,8 @@ __all__ = [
     "squash_frames",
     "Path",
     "Midpoints",
+    "type_adding_dataclass",
+    "union_of_subclasses",
 ]
 
 
@@ -53,6 +61,25 @@ def to_gql_input(ob) -> str:
         return json.dumps(ob)
     else:
         raise ValueError("Cannot format %r" % ob)
+
+
+def type_adding_dataclass(cls):
+    if not hasattr(cls, "__annotations__"):
+        setattr(cls, "__annotations__", {})
+    cls.__annotations__["type"] = Literal[cls.__name__]
+    setattr(cls, "type", cls.__name__)
+    return dataclass(cls, config=ConfigDict(arbitrary_types_allowed=True))
+
+
+def union_of_subclasses(cls, ann=None):
+    # Union of subclasses without base
+    if ann is not None:
+        args = get_args(ann)
+        subclasses = tuple(c[args] for c in _rec_subclasses(cls))
+    else:
+        subclasses = tuple(_rec_subclasses(cls))
+    if len(subclasses) > 1:
+        return Union[subclasses]
 
 
 def if_instance_do(x: Any, cls: Type, func: Callable):
