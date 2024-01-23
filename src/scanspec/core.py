@@ -11,6 +11,7 @@ from typing import (
     List,
     Optional,
     Sequence,
+    Tuple,
     Type,
     TypeVar,
     Union,
@@ -514,6 +515,30 @@ def squash_frames(stack: List[Frames[Axis]], check_path_changes=True) -> Frames[
                     f"otherwise {frames.axes()} would jump in position"
                 )
     return squashed
+
+
+class DimensionInfo(Generic[Axis]):
+    def __init__(
+        self,
+        axes: Tuple[Tuple[Axis, ...]],
+        shape: Tuple[int, ...],
+        snaked: Tuple[bool, ...] = None,
+    ):
+        self._axes = axes
+        self._shape = shape
+        self._snaked = snaked or (False,) * len(shape)
+
+    @property
+    def axes(self) -> Tuple[Tuple[Axis, ...]]:
+        return self._axes
+
+    @property
+    def shape(self) -> Tuple[int, ...]:
+        return self._shape
+
+    @property
+    def snaked(self) -> Tuple[bool, ...]:
+        return self._snaked
 
 
 class Path(Generic[Axis]):

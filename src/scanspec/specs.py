@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from functools import reduce
 from typing import Any, Callable, Dict, Generic, List, Mapping, Optional, Tuple, Type
+from warnings import warn
 
 import numpy as np
 from pydantic import Field, parse_obj_as
@@ -9,6 +11,7 @@ from pydantic.dataclasses import dataclass
 
 from .core import (
     Axis,
+    DimensionInfo,
     Frames,
     Midpoints,
     Path,
@@ -60,12 +63,29 @@ class Spec(Generic[Axis]):
 
         Ordered from slowest moving to fastest moving.
         """
-        raise NotImplementedError(self)
+        warn(
+            "axes() is deprecated, call dimension_info()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return reduce(
+            lambda a, b: a + list(b), self.dimension_info().axes, initial=list()
+        )
 
     def calculate(self, bounds=True, nested=False) -> List[Frames[Axis]]:
         """Produce a stack of nested `Frames` that form the scan.
 
         Ordered from slowest moving to fastest moving.
+        """
+        raise NotImplementedError(self)
+
+    def dimension_info(self) -> DimensionInfo:
+        """Returns the list of axes in each dimension of the scan,
+        paired with the information on how large each dimension of the scan is,
+        and whether the dimension is snaked in the dimension outside it.
+
+        Deprecates shape() as does not need to call calculate()
+        Deprecates axes() as has the per-dimension information
         """
         raise NotImplementedError(self)
 
@@ -79,7 +99,12 @@ class Spec(Generic[Axis]):
 
     def shape(self) -> Tuple[int, ...]:
         """Return the final, simplified shape of the scan."""
-        return tuple(len(dim) for dim in self.calculate())
+        warn(
+            "shape() is deprecated, call dimension_info()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.dimension_info().shape
 
     def __rmul__(self, other) -> Product[Axis]:
         return if_instance_do(other, int, lambda o: Product(Repeat(o), self))
@@ -127,13 +152,19 @@ class Product(Spec[Axis]):
     outer: Spec[Axis] = Field(description="Will be executed once")
     inner: Spec[Axis] = Field(description="Will be executed len(outer) times")
 
-    def axes(self) -> List:
-        return self.outer.axes() + self.inner.axes()
-
     def calculate(self, bounds=True, nested=False) -> List[Frames[Axis]]:
         frames_outer = self.outer.calculate(bounds=False, nested=nested)
         frames_inner = self.inner.calculate(bounds, nested=True)
         return frames_outer + frames_inner
+
+    def dimension_info(self) -> DimensionInfo:
+        outer_info = self.outer.dimension_info()
+        inner_info = self.inner.dimension_info()
+        return DimensionInfo(
+            axes=outer_info.axes + inner_info.axes,
+            shape=outer_info.shape + inner_info.shape,
+            snaked=outer_info.snaked + inner_info.snaked,
+        )
 
 
 @dataclass(config=StrictConfig)
@@ -166,11 +197,11 @@ class Repeat(Spec[Axis]):
         default=True,
     )
 
-    def axes(self) -> List:
-        return []
-
     def calculate(self, bounds=True, nested=False) -> List[Frames[Axis]]:
         return [Frames({}, gap=np.full(self.num, self.gap))]
+
+    def dimension_info(self) -> DimensionInfo:
+        return DimensionInfo(axes=((DURATION,),), shape=(self.num,))
 
 
 @dataclass(config=StrictConfig)
@@ -202,9 +233,6 @@ class Zip(Spec[Axis]):
     right: Spec[Axis] = Field(
         description="The right-hand Spec to Zip, will appear later in axes"
     )
-
-    def axes(self) -> List:
-        return self.left.axes() + self.right.axes()
 
     def calculate(self, bounds=True, nested=False) -> List[Frames[Axis]]:
         frames_left = self.left.calculate(bounds, nested)
@@ -243,6 +271,24 @@ class Zip(Spec[Axis]):
             frames.append(combined)
         return frames
 
+    def dimension_info(self) -> DimensionInfo:
+        left_info = self.left.dimension_info()
+        right_info = self.right.dimension_info()
+        left = left_info.axes
+        padded_right = ((None,),) * (
+            len(left_info.axes) - len(right_info.axes)
+        ) + right_info.axes
+        axes = tuple(
+            left[i] if padded_right[i] == (None,) else left[i] + padded_right[i]
+            for i in range(len(left_info.axes))
+        )
+
+        return DimensionInfo(
+            axes=axes,
+            shape=left_info.shape,
+            snaked=left_info.snaked,  # Non-matching Snake axes cannot be Zipped
+        )
+
 
 @dataclass(config=StrictConfig)
 class Mask(Spec[Axis]):
@@ -271,9 +317,6 @@ class Mask(Spec[Axis]):
         default=True,
     )
 
-    def axes(self) -> List:
-        return self.spec.axes()
-
     def calculate(self, bounds=True, nested=False) -> List[Frames[Axis]]:
         frames = self.spec.calculate(bounds, nested)
         for axis_set in self.region.axis_sets():
@@ -294,6 +337,21 @@ class Mask(Spec[Axis]):
             indices = get_mask(self.region, f.midpoints).nonzero()[0]
             masked_frames.append(f.extract(indices))
         return masked_frames
+
+    def dimension_info(self) -> DimensionInfo:
+        """
+        As Mask applies a Region to a Spec, which may alter the Spec, but this is not
+        knowable without calculating the entire Spec, we have to calculate the Spec
+        here.
+        Currently we throw away the results of this calculation, but in future we may
+        want to cache the result, or else modify the behaviour of this method generally
+        to match.
+        """
+        frames = self.calculate(bounds=False, nested=False)
+        shape = tuple(len(x.midpoints) for x in frames)
+        axes = tuple(tuple(x.axes()) for x in frames)
+        snaked = tuple(isinstance(x, SnakedFrames) for x in frames)
+        return DimensionInfo(axes=axes, shape=shape, snaked=snaked)
 
     # *+ bind more tightly than &|^ so without these overrides we
     # would need to add brackets to all combinations of Regions
@@ -329,14 +387,20 @@ class Snake(Spec[Axis]):
         description="The Spec to run in reverse every other iteration"
     )
 
-    def axes(self) -> List:
-        return self.spec.axes()
-
     def calculate(self, bounds=True, nested=False) -> List[Frames[Axis]]:
         return [
             SnakedFrames.from_frames(segment)
             for segment in self.spec.calculate(bounds, nested)
         ]
+
+    def dimension_info(self) -> DimensionInfo:
+        spec_info = self.spec.dimension_info()
+        return DimensionInfo(
+            axes=spec_info.axes,
+            shape=spec_info.shape,
+            snaked=(True,) * len(spec_info.shape),
+        )
+        return self.spec.dimension_info()
 
 
 @dataclass(config=StrictConfig)
@@ -368,13 +432,6 @@ class Concat(Spec[Axis]):
         default=True,
     )
 
-    def axes(self) -> List:
-        left_axes, right_axes = self.left.axes(), self.right.axes()
-        # Assuming the axes are the same, the order does not matter, we inherit the
-        # order from the left-hand side. See also scanspec.core.concat.
-        assert set(left_axes) == set(right_axes), f"axes {left_axes} != {right_axes}"
-        return left_axes
-
     def calculate(self, bounds=True, nested=False) -> List[Frames[Axis]]:
         dim_left = squash_frames(
             self.left.calculate(bounds, nested), nested and self.check_path_changes
@@ -384,6 +441,19 @@ class Concat(Spec[Axis]):
         )
         dim = dim_left.concat(dim_right, self.gap)
         return [dim]
+
+    def dimension_info(self) -> DimensionInfo:
+        left_info = self.left.dimension_info()
+        right_info = self.right.dimension_info()
+        assert left_info.axes == right_info.axes
+        # We will squash each spec into 1 dimension
+        left_size = reduce(lambda a, b: a * b, left_info.shape)
+        right_size = reduce(lambda a, b: a * b, right_info.shape)
+        return DimensionInfo(
+            axes=left_info.axes,
+            shape=(left_size + right_size,),
+            snaked=left_info.snaked,  # Non-matching Snake axes cannot be Concat
+        )
 
 
 @dataclass(config=StrictConfig)
@@ -406,13 +476,17 @@ class Squash(Spec[Axis]):
         default=True,
     )
 
-    def axes(self) -> List:
-        return self.spec.axes()
-
     def calculate(self, bounds=True, nested=False) -> List[Frames[Axis]]:
         dims = self.spec.calculate(bounds, nested)
         dim = squash_frames(dims, nested and self.check_path_changes)
         return [dim]
+
+    def dimension_info(self) -> DimensionInfo:
+        spec_info = self.spec.dimension_info()
+        return DimensionInfo(
+            axes=(reduce(lambda a, b: a + b, spec_info.axes),),
+            shape=(reduce(lambda a, b: a * b, spec_info.shape),),
+        )
 
 
 def _dimensions_from_indexes(
@@ -458,8 +532,8 @@ class Line(Spec[Axis]):
     stop: float = Field(description="Midpoint of the last point of the line")
     num: int = Field(min=1, description="Number of frames to produce")
 
-    def axes(self) -> List:
-        return [self.axis]
+    def dimension_info(self) -> DimensionInfo:
+        return DimensionInfo(axes=((self.axis,),), shape=(self.num,))
 
     def _line_from_indexes(self, indexes: np.ndarray) -> Dict[Axis, np.ndarray]:
         if self.num == 1:
@@ -475,7 +549,7 @@ class Line(Spec[Axis]):
 
     def calculate(self, bounds=True, nested=False) -> List[Frames[Axis]]:
         return _dimensions_from_indexes(
-            self._line_from_indexes, self.axes(), self.num, bounds
+            self._line_from_indexes, [self.axis], self.num, bounds
         )
 
     @classmethod
@@ -538,16 +612,16 @@ class Static(Spec[Axis]):
         """
         return cls(DURATION, duration, num)
 
-    def axes(self) -> List:
-        return [self.axis]
-
     def _repeats_from_indexes(self, indexes: np.ndarray) -> Dict[Axis, np.ndarray]:
         return {self.axis: np.full(len(indexes), self.value)}
 
     def calculate(self, bounds=True, nested=False) -> List[Frames[Axis]]:
         return _dimensions_from_indexes(
-            self._repeats_from_indexes, self.axes(), self.num, bounds
+            self._repeats_from_indexes, [self.axis], self.num, bounds
         )
+
+    def dimension_info(self) -> DimensionInfo:
+        return DimensionInfo(axes=((self.axis,),), shape=(self.num,))
 
 
 @dataclass(config=StrictConfig)
@@ -577,9 +651,12 @@ class Spiral(Spec[Axis]):
         description="How much to rotate the angle of the spiral", default=0.0
     )
 
-    def axes(self) -> List[Axis]:
-        # TODO: reversed from __init__ args, a good idea?
-        return [self.y_axis, self.x_axis]
+    def dimension_info(self) -> DimensionInfo:
+        return DimensionInfo(
+            # TODO: reversed from __init__ args, a good idea?
+            axes=((self.y_axis, self.x_axis),),
+            shape=(self.num,),
+        )
 
     def _spiral_from_indexes(self, indexes: np.ndarray) -> Dict[Axis, np.ndarray]:
         # simplest spiral equation: r = phi
@@ -600,7 +677,7 @@ class Spiral(Spec[Axis]):
 
     def calculate(self, bounds=True, nested=False) -> List[Frames[Axis]]:
         return _dimensions_from_indexes(
-            self._spiral_from_indexes, self.axes(), self.num, bounds
+            self._spiral_from_indexes, [self.y_axis, self.x_axis], self.num, bounds
         )
 
     @classmethod
